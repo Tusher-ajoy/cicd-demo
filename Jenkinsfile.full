@@ -1,0 +1,287 @@
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_IMAGE = "nodejs-demo"
+        DOCKER_TAG = "${BUILD_NUMBER}"
+        SONAR_PROJECT_KEY = "nodejs-demo"
+        GITLEAKS_VERSION = "8.18.0"
+    }
+    
+    stages {
+        stage('Pull Code from GitHub') {
+            steps {
+                echo 'Pulling latest code from GitHub...'
+                checkout scm
+                
+                // Display current commit info
+                script {
+                    def commitId = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+                    def commitMessage = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
+                    echo "Building commit: ${commitId}"
+                    echo "Commit message: ${commitMessage}"
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                echo 'Building Docker image...'
+                script {
+                    def image = docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}")
+                    // Also tag as latest
+                    sh "docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest"
+                }
+            }
+        }
+        
+        stage('Gitleaks Secret Scanning') {
+            steps {
+                echo 'Running Gitleaks for secret scanning...'
+                script {
+                    // Download and install Gitleaks if not present
+                    sh """
+                        if [ ! -f /tmp/gitleaks ]; then
+                            wget -O /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz
+                            tar -xzf /tmp/gitleaks.tar.gz -C /tmp/
+                            chmod +x /tmp/gitleaks
+                        fi
+                    """
+                    
+                    // Run Gitleaks scan
+                    def gitleaksResult = sh(returnStatus: true, script: "/tmp/gitleaks detect --source . --report-format json --report-path gitleaks-report.json --verbose")
+                    
+                    if (gitleaksResult != 0) {
+                        echo 'Secrets detected by Gitleaks!'
+                        archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
+                        // Don't fail the build, just warn
+                        unstable(message: "Gitleaks detected potential secrets")
+                    } else {
+                        echo 'No secrets detected by Gitleaks'
+                    }
+                }
+            }
+        }
+        
+        stage('SonarQube Analysis') {
+            steps {
+                echo 'Running SonarQube analysis...'
+                script {
+                    // Run tests with coverage first
+                    sh """
+                        docker run --rm -v \$(pwd):/app -w /app node:20-alpine sh -c "
+                            npm install &&
+                            npm test -- --coverage --coverageReporters=lcov
+                        "
+                    """
+                    
+                    // Run SonarQube scanner
+                    withSonarQubeEnv('SonarQube') {
+                        sh """
+                            sonar-scanner \
+                                -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                                -Dsonar.sources=src \
+                                -Dsonar.tests=__tests__ \
+                                -Dsonar.test.inclusions=__tests__/**/*.js \
+                                -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Quality Gate') {
+            steps {
+                echo 'Waiting for SonarQube Quality Gate...'
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+        
+        stage('Run Unit & Integration Tests') {
+            parallel {
+                stage('Unit Tests') {
+                    steps {
+                        echo 'Running unit tests...'
+                        sh """
+                            docker run --rm -v \$(pwd):/app -w /app node:20-alpine sh -c "
+                                npm install &&
+                                npm test -- --testPathPattern=__tests__/.*\\.test\\.js
+                            "
+                        """
+                    }
+                }
+                
+                stage('Integration Tests') {
+                    steps {
+                        echo 'Running integration tests with database...'
+                        sh """
+                            # Start services for integration testing
+                            docker-compose -f docker-compose.test.yml up -d mongo
+                            
+                            # Wait for MongoDB to be ready
+                            sleep 10
+                            
+                            # Run integration tests
+                            docker-compose -f docker-compose.test.yml run --rm app npm test
+                            
+                            # Cleanup
+                            docker-compose -f docker-compose.test.yml down -v
+                        """
+                    }
+                }
+            }
+            post {
+                always {
+                    // Archive test results
+                    publishTestResults testResultsPattern: 'test-results.xml'
+                    // Clean up any remaining containers
+                    sh 'docker-compose -f docker-compose.test.yml down -v || true'
+                }
+            }
+        }
+        
+        stage('Database Migration Approval') {
+            steps {
+                script {
+                    echo 'Database migration requires manual approval...'
+                    def userInput = input(
+                        id: 'dbMigrationApproval',
+                        message: 'Approve database migration to production?',
+                        parameters: [
+                            choice(
+                                name: 'APPROVE_MIGRATION',
+                                choices: ['No', 'Yes'],
+                                description: 'Do you approve running database migrations in production?'
+                            )
+                        ]
+                    )
+                    
+                    if (userInput != 'Yes') {
+                        error('Database migration was not approved')
+                    }
+                    
+                    echo 'Database migration approved!'
+                }
+            }
+        }
+        
+        stage('Run Database Migration') {
+            steps {
+                echo 'Running database migration...'
+                script {
+                    // In a real scenario, this would connect to production DB
+                    sh """
+                        # Run migration against production database
+                        docker run --rm \
+                            -e MONGO_URI=\${PROD_MONGO_URI} \
+                            -v \$(pwd):/app -w /app \
+                            ${DOCKER_IMAGE}:${DOCKER_TAG} \
+                            npm run migrate
+                    """
+                    
+                    echo 'Database migration completed successfully!'
+                }
+            }
+        }
+        
+        stage('Final Deployment Approval') {
+            steps {
+                script {
+                    echo 'Final deployment requires manual approval...'
+                    def deployInput = input(
+                        id: 'deploymentApproval',
+                        message: 'Approve final deployment to production?',
+                        parameters: [
+                            choice(
+                                name: 'APPROVE_DEPLOY',
+                                choices: ['No', 'Yes'],
+                                description: 'Do you approve deploying to production?'
+                            ),
+                            string(
+                                name: 'DEPLOYMENT_NOTES',
+                                defaultValue: '',
+                                description: 'Optional deployment notes'
+                            )
+                        ]
+                    )
+                    
+                    if (deployInput.APPROVE_DEPLOY != 'Yes') {
+                        error('Final deployment was not approved')
+                    }
+                    
+                    echo "Final deployment approved!"
+                    if (deployInput.DEPLOYMENT_NOTES) {
+                        echo "Deployment notes: ${deployInput.DEPLOYMENT_NOTES}"
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Production') {
+            steps {
+                echo 'Deploying to production...'
+                script {
+                    // Tag image for production
+                    sh "docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:production"
+                    
+                    // Deploy using docker-compose (or your preferred deployment method)
+                    sh """
+                        # Update production docker-compose with new image tag
+                        sed -i 's/image: .*/image: ${DOCKER_IMAGE}:${DOCKER_TAG}/' docker-compose.prod.yml || true
+                        
+                        # Deploy to production
+                        docker-compose -f docker-compose.prod.yml up -d
+                        
+                        # Health check
+                        sleep 30
+                        curl -f http://localhost:3000/health || exit 1
+                    """
+                    
+                    echo 'Production deployment completed successfully!'
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            // Clean up workspace
+            cleanWs()
+            
+            // Clean up Docker images (keep last 5 builds)
+            sh """
+                docker images ${DOCKER_IMAGE} --format "table {{.Tag}}" | tail -n +2 | sort -n | head -n -5 | xargs -r docker rmi ${DOCKER_IMAGE}: || true
+            """
+        }
+        
+        success {
+            echo 'Pipeline completed successfully!'
+            
+            // Send success notification
+            script {
+                def commitId = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+                def commitMessage = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
+                
+                // You can add Slack, email, or other notifications here
+                echo "✅ Deployment successful for commit ${commitId}: ${commitMessage}"
+            }
+        }
+        
+        failure {
+            echo 'Pipeline failed!'
+            
+            // Send failure notification and archive logs
+            archiveArtifacts artifacts: '**/*.log', allowEmptyArchive: true
+            
+            // You can add Slack, email, or other notifications here
+            echo "❌ Pipeline failed at stage: ${env.STAGE_NAME}"
+        }
+        
+        unstable {
+            echo 'Pipeline completed with warnings!'
+            // Handle unstable builds (e.g., test failures that don't fail the build)
+        }
+    }
+}
