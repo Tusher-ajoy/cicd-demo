@@ -1,8 +1,8 @@
 services:
   app:
-    build: .
-    ports:
-      - "3000:3000"
+    build:
+      context: .
+      dockerfile: Dockerfile.test
     environment:
       - MONGO_URI=mongodb://mongo:27017/demo
       - SECRET_KEY=fake_secret_key_for_gitleaks
