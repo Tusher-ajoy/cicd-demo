@@ -4,16 +4,19 @@ services:
       context: .
       dockerfile: Dockerfile.test
     environment:
-      - MONGO_URI=mongodb://mongo:27017/demo
+      - MONGO_URI=mongodb://mongo:27017/test_db
       - SECRET_KEY=fake_secret_key_for_gitleaks
+      - NODE_ENV=test
     depends_on:
       - mongo
   mongo:
     image: mongo:6.0
     restart: always
     ports:
-      - "27017:27017"
-    volumes:
-      - mongo-data:/data/db
+      - "27018:27017"  # Use port 27018 to avoid conflicts
+    environment:
+      - MONGO_INITDB_DATABASE=test_db
+    tmpfs:
+      - /data/db  # Use in-memory storage for faster tests
 volumes:
   mongo-data:
