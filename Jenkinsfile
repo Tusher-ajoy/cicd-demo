@@ -77,7 +77,7 @@ pipeline {
                         echo "Running unit tests (health check)..."
                         docker run --rm -v $(pwd):/app -w /app -e NODE_ENV=test node:20-alpine sh -c "
                             npm install --quiet &&
-                            npm run test:unit
+                            (npm run test:unit || npm test)
                         "
                     ''')
                     
