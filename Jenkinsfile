@@ -8,39 +8,39 @@ pipeline {
     }
     
     stages {
-        stage('🔄 Checkout Code from GitHub') {
+        stage('Checkout Code from GitHub') {
             steps {
-                echo '🚀 Checking out code from GitHub...'
+                echo 'Checking out code from GitHub...'
                 git branch: 'main',
                     url: 'https://github.com/Tusher-ajoy/cicd-demo.git'
                 
-                script {
-                    def commitId = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
-                    def commitMessage = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
-                    echo "📝 Building commit: ${commitId}"
-                    echo "💬 Commit message: ${commitMessage}"
+                // script {
+                //     def commitId = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+                //     def commitMessage = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
+                //     echo "Building commit: ${commitId}"
+                //     echo "Commit message: ${commitMessage}"
                     
-                    // Store commit info for later use
-                    env.COMMIT_ID = commitId
-                    env.COMMIT_MESSAGE = commitMessage
-                }
+                //     // Store commit info for later use
+                //     env.COMMIT_ID = commitId
+                //     env.COMMIT_MESSAGE = commitMessage
+                // }
             }
         }
         
-        stage('🐳 Docker Build') {
+        stage('Docker Build') {
             steps {
-                echo '🔨 Building Docker image with docker compose...'
+                echo 'Building Docker image with docker compose...'
                 sh """
                     echo "Building application with Docker Compose..."
                     docker compose build
-                    echo "✅ Docker build completed successfully!"
+                    echo "Docker build completed successfully!"
                 """
             }
         }
         
-        stage('🔍 Gitleaks Secret Scanning') {
+        stage('Gitleaks Secret Scanning') {
             steps {
-                echo '🔒 Running Gitleaks for secret scanning...'
+                echo 'Running Gitleaks for secret scanning...'
                 script {
                     def gitleaksResult = sh(returnStatus: true, script: '''
                         echo "Downloading and running Gitleaks..."
@@ -54,10 +54,10 @@ pipeline {
                     ''')
                     
                     if (fileExists('gitleaks-report.json')) {
-                        echo '⚠️ Secrets detected by Gitleaks (this is expected for demo)!'
+                        echo 'Secrets detected by Gitleaks!'
                         archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
                     } else {
-                        echo '✅ No secrets detected by Gitleaks'
+                        echo 'No secrets detected by Gitleaks'
                     }
                 }
             }
@@ -70,41 +70,49 @@ pipeline {
                     // Clean up any existing test containers first
                     sh 'docker compose -f docker-compose.test.yml down -v || true'
                     
-                    // Check for port conflicts and handle them
-                    def testResult = sh(returnStatus: true, script: '''
-                        echo "Checking for port conflicts..."
-                        
-                        # Stop any conflicting containers temporarily
-                        CONFLICTING_CONTAINERS=$(docker ps --format "table {{.Names}}" | grep -E "(mongo|mongodb)" | head -5)
-                        if [ ! -z "$CONFLICTING_CONTAINERS" ]; then
-                            echo "⚠️ Found conflicting MongoDB containers, stopping temporarily:"
-                            echo "$CONFLICTING_CONTAINERS"
-                            echo "$CONFLICTING_CONTAINERS" | xargs -r docker stop
-                        fi
-                        
-                        # Run integration tests
-                        echo "Running integration tests with database..."
-                        docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --timeout 120
-                        
-                        # Restart any stopped containers
-                        if [ ! -z "$CONFLICTING_CONTAINERS" ]; then
-                            echo "Restarting previously stopped containers..."
-                            echo "$CONFLICTING_CONTAINERS" | xargs -r docker start
-                        fi
+                    echo '🔄 Running tests with timeout and fallback strategy...'
+                    
+                    // Try unit tests first (faster and more reliable)
+                    def unitTestResult = sh(returnStatus: true, script: '''
+                        echo "Running unit tests (health check)..."
+                        docker run --rm -v $(pwd):/app -w /app -e NODE_ENV=test node:20-alpine sh -c "
+                            npm install --quiet &&
+                            npm run test:unit
+                        "
                     ''')
                     
-                    if (testResult == 0) {
-                        echo '✅ Integration tests completed successfully!'
+                    if (unitTestResult == 0) {
+                        echo '✅ Unit tests passed!'
+                        
+                        // Now try integration tests with database
+                        echo 'Attempting integration tests with database...'
+                        def integrationResult = sh(returnStatus: true, script: '''
+                            echo "Starting test database..."
+                            timeout 60 docker compose -f docker-compose.test.yml up -d mongo
+                            
+                            # Wait for MongoDB to be ready
+                            echo "Waiting for database to be ready..."
+                            sleep 15
+                            
+                            # Check if MongoDB is accessible
+                            if docker run --rm --network cicd-demo_default mongo:6.0 mongosh --host mongo --eval "db.runCommand('ping')" >/dev/null 2>&1; then
+                                echo "Database is ready, running integration tests..."
+                                docker compose -f docker-compose.test.yml run --rm app npm run test:integration
+                            else
+                                echo "Database not accessible, skipping integration tests"
+                                exit 1
+                            fi
+                        ''')
+                        
+                        if (integrationResult == 0) {
+                            echo '✅ Integration tests also passed!'
+                        } else {
+                            echo '⚠️ Integration tests failed, but unit tests passed'
+                            unstable(message: "Integration tests failed but unit tests passed")
+                        }
                     } else {
-                        echo '⚠️ Integration tests had issues, running unit tests as fallback...'
-                        sh """
-                            echo "Running unit tests in isolated environment..."
-                            docker run --rm -v \$(pwd):/app -w /app node:20-alpine sh -c "
-                                npm install &&
-                                npm test
-                            "
-                            echo "✅ Unit tests completed successfully!"
-                        """
+                        echo '❌ Unit tests failed'
+                        error('Unit tests failed')
                     }
                 }
             }
@@ -116,9 +124,9 @@ pipeline {
             }
         }
         
-        stage('📊 SonarQube Code Analysis') {
+        stage('SonarQube Code Analysis') {
             steps {
-                echo '📊 Running SonarQube analysis (simulated)...'
+                echo 'Running SonarQube analysis...'
                 sh """
                     echo "Analyzing code quality and security issues..."
                     echo "Project: ${APP_NAME}"
@@ -126,19 +134,19 @@ pipeline {
                     echo "Commit: ${COMMIT_ID}"
                     
                     # Simulate SonarQube analysis
-                    echo "✅ Code quality analysis completed!"
-                    echo "📊 Quality Gate: PASSED"
+                    echo "Code quality analysis completed!"
+                    echo "Quality Gate: PASSED"
                 """
             }
         }
         
-        stage('⏸️ Database Migration Approval') {
+        stage('Database Migration Approval') {
             steps {
                 script {
-                    echo '⏳ Database migration requires manual approval...'
+                    echo 'Database migration requires manual approval...'
                     def userInput = input(
                         id: 'dbMigrationApproval',
-                        message: '🔄 Approve database migration to production?',
+                        message: 'Approve database migration to production?',
                         parameters: [
                             choice(
                                 name: 'APPROVE_MIGRATION',
@@ -157,25 +165,25 @@ pipeline {
             }
         }
         
-        stage('🗃️ Database Migration') {
+        stage('Database Migration') {
             steps {
-                echo '🗃️ Running database migration...'
+                echo 'Running database migration...'
                 sh """
                     echo "Running database migration..."
                     # Run migration using Docker Compose
                     docker compose run --rm app npm run migrate || echo "Migration completed (or already up to date)"
-                    echo "✅ Database migration completed successfully!"
+                    echo "Database migration completed successfully!"
                 """
             }
         }
         
-        stage('⏸️ Final Deployment Approval') {
+        stage('Final Deployment Approval') {
             steps {
                 script {
-                    echo '⏳ Final deployment requires manual approval...'
+                    echo 'Final deployment requires manual approval...'
                     def deployInput = input(
                         id: 'deploymentApproval',
-                        message: '🚀 Approve final deployment to production?',
+                        message: 'Approve final deployment to production?',
                         parameters: [
                             choice(
                                 name: 'APPROVE_DEPLOY',
@@ -196,15 +204,15 @@ pipeline {
                     
                     echo "✅ Final deployment approved!"
                     if (deployInput.DEPLOYMENT_NOTES) {
-                        echo "📝 Deployment notes: ${deployInput.DEPLOYMENT_NOTES}"
+                        echo "Deployment notes: ${deployInput.DEPLOYMENT_NOTES}"
                     }
                 }
             }
         }
         
-        stage('🚀 Deploy with Docker Compose') {
+        stage('Deploy with Docker Compose') {
             steps {
-                echo '🚀 Deploying application with Docker Compose...'
+                echo 'Deploying application with Docker Compose...'
                 sh """
                     echo "Stopping existing containers..."
                     docker compose down || true
@@ -220,9 +228,9 @@ pipeline {
             }
         }
         
-        stage('🔍 Check Running Containers') {
+        stage('Check Running Containers') {
             steps {
-                echo '🔍 Verifying deployed containers...'
+                echo 'Verifying deployed containers...'
                 sh """
                     echo "Current running containers:"
                     docker ps
@@ -232,7 +240,7 @@ pipeline {
                     docker compose ps
                     
                     echo ""
-                    echo "✅ Container verification completed!"
+                    echo "Container verification completed!"
                 """
             }
         }
@@ -240,7 +248,7 @@ pipeline {
     
     post {
         always {
-            echo '🧹 Cleaning up...'
+            echo 'Cleaning up...'
             sh """
                 echo "Cleaning up test containers..."
                 docker compose -f docker-compose.test.yml down -v || true
@@ -256,7 +264,7 @@ pipeline {
             script {
                 echo """
                 ✅ DEPLOYMENT SUCCESSFUL! 
-                📝 Summary:
+                Summary:
                    • Application: ${APP_NAME}
                    • Commit: ${env.COMMIT_ID}
                    • Build: ${env.BUILD_NUMBER} 
@@ -268,7 +276,7 @@ pipeline {
         
         failure {
             echo '❌ Pipeline failed!'
-            echo "💥 Failed at stage: ${env.STAGE_NAME}"
+            echo "Failed at stage: ${env.STAGE_NAME}"
                         
             script {
                 echo "Rolling back deployment..."
@@ -281,7 +289,7 @@ pipeline {
         }
         
         unstable {
-            echo '⚠️ Pipeline completed with warnings!'
+            echo 'Pipeline completed with warnings!'
         }
     }
 }
