@@ -27,5 +27,11 @@ jobs:
 
       - name: docker build
         run: |
-          docker build -t ci-cd-demo:latest .
-            
+          docker build -t tusher001/ci-cd-demo:latest .
+      - name: docker login
+        run: |
+          echo "${{ secrets.DOCKER_SECRET }}" | docker login -u "tusher001" --password-stdin
+        
+      - name: docker push
+        run: |
+          docker push tusher001/ci-cd-demo:latest
